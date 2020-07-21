@@ -1,4 +1,4 @@
-PLUGIN_LIST := fasm xdc ql-iob ql-mux
+PLUGIN_LIST := fasm xdc ql-iob ql-mux integrateinv
 PLUGINS := $(foreach plugin,$(PLUGIN_LIST),$(plugin).so)
 PLUGINS_INSTALL := $(foreach plugin,$(PLUGIN_LIST),install_$(plugin))
 PLUGINS_CLEAN := $(foreach plugin,$(PLUGIN_LIST),clean_$(plugin))
