@@ -31,12 +31,43 @@ void register_in_tcl_interpreter(const std::string& command) {
     Tcl_Eval(interp, tcl_script.c_str());
 }
 
+/// A structure representing a pin
+struct Pin {
+    RTLIL::Cell*    cell; /// Cell pointer
+    RTLIL::IdString port; /// Cell port name
+    int             bit;  /// Port bit index
+
+    Pin (RTLIL::Cell* _cell, const RTLIL::IdString& _port, int _bit = 0) :
+        cell  (_cell),
+        port  (_port),
+        bit   (_bit) {}
+
+    Pin (const Pin& ref) = default;
+
+    unsigned int hash() const {
+        if (cell == nullptr) {
+            return mkhash_add(port.hash(), bit);
+        } else {
+            return mkhash_add(mkhash(cell->hash(), port.hash()), bit);
+        }
+    };
+};
+
+bool operator == (const Pin& lhs, const Pin& rhs) {
+    return (lhs.cell == rhs.cell) && (lhs.port == rhs.port) && (lhs.bit == rhs.bit);
+}
+
 struct IntegrateInv : public Pass {
 
     /// Temporary SigBit to SigBit helper map.
     SigMap m_SigMap;
     /// Map of SigBit objects to inverter cells.
     dict<RTLIL::SigBit, RTLIL::Cell*> m_InvMap;
+    /// Map of inverter cells that can potentially be integrated and invertable
+    /// pins that they are connected to
+    dict<RTLIL::Cell*, pool<Pin>> m_Inverters;
+    /// Map of invertable pins and names of parameters controlling inversions
+    dict<Pin, RTLIL::IdString> m_InvParams;
 
     IntegrateInv () :
         Pass("integrateinv", "Integrates inverters ($_NOT_ cells) into ports with 'invertible_pin' attribute set") {
@@ -68,17 +99,28 @@ struct IntegrateInv : public Pass {
             m_SigMap.clear();
             m_SigMap.set(module);
 
+            m_Inverters.clear();
+            m_InvParams.clear();
+
             // Setup inverter map
             buildInverterMap(module);
 
-            // Process cells
+            // Identify inverters that can be integrated and assign them with
+            // lists of cells and ports to integrate with
             for (auto cell : module->selected_cells()) {
-                processCell(cell);
+                collectInverters(cell);
             }
+
+            // Integrate inverters
+            integrateInverters();
         }
 
-        // Clear the SigMap
+        // Clear maps
         m_SigMap.clear();
+
+        m_InvMap.clear();
+        m_Inverters.clear();
+        m_InvParams.clear();
     }
 
     void buildInverterMap (RTLIL::Module* a_Module) {
@@ -101,7 +143,7 @@ struct IntegrateInv : public Pass {
         }
     }
 
-    void processCell (RTLIL::Cell* a_Cell) {
+    void collectInverters (RTLIL::Cell* a_Cell) {
         auto module = a_Cell->module;
         auto design = module->design;
 
@@ -134,21 +176,6 @@ struct IntegrateInv : public Pass {
 
             // Decode the parameter name.
 			RTLIL::IdString paramName = RTLIL::escape_id(it->second.decode_string());
-			RTLIL::Const    invMask;
-
-			auto it2 = a_Cell->parameters.find(paramName);
-	    	if (it2 == a_Cell->parameters.end()) {
-		    	invMask = RTLIL::Const(0, sigspec.size());
-            }
-            else {
-                invMask = RTLIL::Const(it2->second);
-            }
-
-            // Check width.
-			if (invMask.size() != sigspec.size()) {
-				log_error("The inversion parameter needs to be the same width as the port (%s.%s port %s parameter %s)",
-                    log_id(module->name), log_id(a_Cell->type), log_id(port), log_id(paramName));
-            }
 
             // Look for connected inverters
             auto sigbits = sigspec.bits();
@@ -165,34 +192,154 @@ struct IntegrateInv : public Pass {
                 if (!m_InvMap.count(sigbit)) {
                     continue;
                 }
-                auto inv = m_InvMap[sigbit];
+                auto inv = m_InvMap.at(sigbit);
 
-                log("Integrating inverter %s into %s.%s\n",
-                    log_id(inv->name), log_id(a_Cell->name), log_id(port));
+                // Save the inverter pin and the parameter name
+                auto pin = Pin(a_Cell, port, bit);
 
-                // Save the connection & remove the inverter
-                sigbits[bit] = inv->getPort(RTLIL::escape_id("A"))[0];
-                module->remove(inv);
+                auto& list = m_Inverters[inv];
+                list.insert(pin);
 
-                // Toggle the inversion bit in the mask
-                if (invMask[bit] == RTLIL::State::S0) {
-                    invMask[bit] = RTLIL::State::S1;
+                log_assert(m_InvParams.count(pin) == 0);
+                m_InvParams[pin] = paramName;
+            }
+        }
+    }
+
+    void integrateInverters () {
+
+        for (auto it : m_Inverters) {
+            auto inv  = it.first;
+            auto pins = it.second;
+
+            // List all sinks of the inverter
+            auto sinks = getSinksForDriver(Pin(inv, RTLIL::escape_id("Y")));
+
+            // If the inverter drives only invertable pins then integrate it
+            if (sinks == pins) {
+                log("Integrating inverter %s into:\n", log_id(inv->name));
+
+                // Integrate into each pin
+                for (auto pin : pins) {
+                    log_assert(pin.cell != nullptr);
+                    log(" %s.%s[%d]\n", log_id(pin.cell->name), log_id(pin.port), pin.bit);
+    
+                    // Change the connection
+                    auto sigspec = pin.cell->getPort(pin.port);
+                    auto sigbits = sigspec.bits();
+
+                    log_assert((size_t)pin.bit < sigbits.size());
+                    sigbits[pin.bit] = RTLIL::SigBit(inv->getPort(RTLIL::escape_id("A"))[0]);
+                    pin.cell->setPort(pin.port, RTLIL::SigSpec(sigbits));
+
+                    // Get the control parameter
+                    log_assert(m_InvParams.count(pin) != 0);
+                    auto paramName = m_InvParams[pin];
+
+                    RTLIL::Const invMask;
+                    auto param = pin.cell->parameters.find(paramName);
+                    if (param == pin.cell->parameters.end()) {
+                        invMask = RTLIL::Const(0, sigspec.size());
+                    }
+                    else {
+                        invMask = RTLIL::Const(param->second);
+                    }
+
+                    // Check width.
+        			if (invMask.size() != sigspec.size()) {
+		        		log_error("The inversion parameter needs to be the same width as the port (%s port %s parameter %s)",
+                            log_id(pin.cell->name), log_id(pin.port), log_id(paramName));
+                    }
+
+                    // Toggle bit in the control parameter bitmask
+                    if (invMask[pin.bit] == RTLIL::State::S0) {
+                        invMask[pin.bit] = RTLIL::State::S1;
+                    }
+                    else if (invMask[pin.bit] == RTLIL::State::S1) {
+                        invMask[pin.bit] = RTLIL::State::S0;
+                    }
+                    else {
+                        log_error("The inversion parameter must contain only 0s and 1s (%s parameter %s)\n",
+                            log_id(pin.cell->name), log_id(paramName));
+                    }
+
+                    // Set the parameter back
+                    pin.cell->setParam(paramName, invMask);
                 }
-                else if (invMask[bit] == RTLIL::State::S1) {
-                    invMask[bit] = RTLIL::State::S0;
+
+                // Remove the inverter
+                inv->module->remove(inv);
+            }
+        }
+    }
+
+    pool<Pin> getSinksForDriver (const Pin& a_Driver) {
+        auto module = a_Driver.cell->module;
+        pool<Pin> sinks;
+
+        // The driver has to be an output pin
+        if (!a_Driver.cell->output(a_Driver.port)) {
+            return sinks;
+        }
+
+        // Get the driver sigbit
+        auto driverSigspec = a_Driver.cell->getPort(a_Driver.port);
+        auto driverSigbit  = m_SigMap(driverSigspec.bits().at(a_Driver.bit));
+
+        // Look for connected sinks
+        for (auto cell : module->cells()) {
+            for (auto conn : cell->connections()) {
+                auto port    = conn.first;
+                auto sigspec = conn.second;
+
+                // Consider only sinks (inputs)
+                if (!cell->input(port)) {
+                    continue;
                 }
-                else {
-                    log_error("The inversion parameter must contain only 0s and 1s (%s parameter %s)\n",
-                        log_id(a_Cell->name), log_id(paramName));
+
+                // Check all sigbits
+                auto sigbits = sigspec.bits();
+                for (size_t bit=0; bit<sigbits.size(); ++bit) {
+
+                    auto sigbit = sigbits[bit];
+                    if (!sigbit.wire) {
+                        continue;
+                    }
+
+                    // Got a sink pin of another cell
+                    sigbit = m_SigMap(sigbit);
+                    if (sigbit == driverSigbit) {
+                        sinks.insert(Pin(cell, port, bit));
+                    }
                 }
             }
-
-            // Set the parameter
-            log_debug("Updating inversion parameter %s.%s to %s\n",
-                log_id(a_Cell->name), log_id(paramName), log_const(invMask));
-
-            a_Cell->setParam(paramName, invMask);
         }
+
+        // Look for connected top-level output ports
+        for (auto conn : module->connections()) {
+            auto dst = conn.first;
+            auto src = conn.second;
+
+            auto sigbits = dst.bits();
+            for (size_t bit=0; bit<sigbits.size(); ++bit) {
+
+                auto sigbit = sigbits[bit];
+                if (!sigbit.wire) {
+                    continue;
+                }
+
+                if (!sigbit.wire->port_output) {
+                    continue;
+                }
+
+                sigbit = m_SigMap(sigbit);
+                if (sigbit == driverSigbit) {
+                    sinks.insert(Pin(nullptr, sigbit.wire->name, bit));
+                }
+            }
+        }
+
+        return sinks;
     }
 
 } IntegrateInv;

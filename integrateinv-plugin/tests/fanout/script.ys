@@ -1,0 +1,9 @@
+plugin -i ../../integrateinv.so
+
+read_verilog -icells design.v
+hierarchy -check -auto-top
+
+debug integrateinv
+
+select t:$_NOT_ -assert-count 1
+select t:box r:INV_A=1'b1 %i -assert-count 3

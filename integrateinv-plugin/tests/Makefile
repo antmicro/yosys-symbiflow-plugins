@@ -1,4 +1,3 @@
-#TESTS = sdiomux ckpad
 TESTS = $(subst /, ,$(wildcard */))
 
 all: $(addsuffix /ok,$(TESTS))
