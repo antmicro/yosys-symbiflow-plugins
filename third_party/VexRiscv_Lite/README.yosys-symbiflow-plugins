@@ -1,0 +1,9 @@
+Name: SpinalHDL is an open source high-level hardware description language. It can be used as an alternative to VHDL or Verilog.
+Short Name: SpinalHDL
+URL: https://github.com/SpinalHDL/SpinalHDL
+Version: v1.3.6
+Revision: 9bf01e7
+License: The Spinal HDL core is under the LGPL license. The Spinal HDL lib is under the MIT license.
+
+Description:
+This package is used as stimuli in some test cases that verify that the Yosys plugins produce expected results.
