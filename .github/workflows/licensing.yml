@@ -19,7 +19,7 @@ jobs:
     steps:
     - uses: actions/checkout@v2
 
-    - uses: SymbiFlow/actions/checks@main
+    - uses: Antmicro/actions/checks@add-hashbang-check
       with:
         exclude_license: |
           ./design_introspection-plugin/tests/selection_to_tcl_list/selection_to_tcl_list.v
