@@ -1946,11 +1946,13 @@ void UhdmAst::process_gen_scope_array() {
 									  	node->type = AST::AST_PREFIX;
 										auto *param = new AST::AstNode(AST::AST_IDENTIFIER);
 										param->str = child->str;
-										auto *field = new AST::AstNode(AST::AST_IDENTIFIER);
-										field->str = "\\" + node->str.substr(node->str.rfind("]") + 2);
 										node->str = node->str.substr(0, node->str.find("["));
 										node->children.push_back(param);
-										node->children.push_back(field);
+										if (node->str.rfind("]") + 2 < node->str.length()) {
+											auto *field = new AST::AstNode(AST::AST_IDENTIFIER);
+											field->str = "\\" + node->str.substr(node->str.rfind("]") + 2);
+											node->children.push_back(field);
+										}
 									  }
 								  });
 							  }
